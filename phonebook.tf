@@ -1,26 +1,19 @@
 //This terraform file deploys Phonebook Application to five Docker Machines on EC2 Instances  which are ready for Docker Swarm operations. Docker Machines will run on Amazon Linux 2  with custom security group allowing SSH (22), HTTP (80) UDP (4789, 7946),  and TCP(2377, 7946, 8080) connections from anywhere.
 //User needs to select appropriate key name when launching the template.
-/*
 terraform {
   required_providers {
     aws = {
-      source = "hashicorp/aws"
-      version = "3.60.0"
+      source  = "hashicorp/aws"
+      version = "~> 3.0"
     }
   }
 }
-*/
 
 provider "aws" {
   region = "us-east-1"
   //  access_key = ""
   //  secret_key = ""
   //  If you have entered your credentials in AWS CLI before, you do not need to use these arguments.
-}
-
-locals {
-  github-repo = "https://github.com/fatih-o/project204.git"
-  github-file-url = "https://raw.githubusercontent.com/fatih-o/project204/master/"
 }
 
 data "aws_caller_identity" "current" {}
@@ -41,30 +34,25 @@ data "template_file" "leader-master" {
     curl -L "https://github.com/docker/compose/releases/download/1.26.2/docker-compose-$(uname -s)-$(uname -m)" \
     -o /usr/local/bin/docker-compose
     chmod +x /usr/local/bin/docker-compose
+    yum install git -y
     docker swarm init
-    aws ecr get-login-password --region ${data.aws_region.current.name} | docker login --username AWS --password-stdin ${aws_ecr_repository.ecr-repo.repository_url}
     docker service create \
       --name=viz \
       --publish=8080:8080/tcp \
       --constraint=node.role==manager \
       --mount=type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
       dockersamples/visualizer
-    yum install git -y
     # uninstall aws cli version 1
     rm -rf /bin/aws
     curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
     unzip awscliv2.zip
     ./aws/install
-    docker build --force-rm -t "${aws_ecr_repository.ecr-repo.repository_url}:latest" ${local.github-repo}
-    docker push "${aws_ecr_repository.ecr-repo.repository_url}:latest"
-    mkdir -p /home/ec2-user/phonebook
-    cd /home/ec2-user/phonebook && echo "ECR_REPO=${aws_ecr_repository.ecr-repo.repository_url}" > .env
-    curl -o "docker-compose.yaml" -L ${local.github-file-url}docker-compose.yaml
-    curl -o "init.sql" -L ${local.github-file-url}init.sql
-    docker-compose config | docker stack deploy --with-registry-auth -c - phonebook
+    yum install amazon-ecr-credential-helper -y
+    mkdir -p /home/ec2-user/.docker
+    cd /home/ec2-user/.docker
+    echo '{"credsStore": "ecr-login"}' > config.json
   EOF
 }
-
 data "template_file" "manager" {
   template = <<EOF
     #! /bin/bash
@@ -81,16 +69,20 @@ data "template_file" "manager" {
     amazon-linux-extras install epel -y
     yum install python-pip -y
     pip install ec2instanceconnectcli
-    eval "$(mssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no  \
-    --region ${data.aws_region.current.name} ${aws_instance.docker-machine-leader-manager.id} docker swarm join-token manager | grep -i 'docker')"
     # uninstall aws cli version 1
     rm -rf /bin/aws
     curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
     unzip awscliv2.zip
     ./aws/install
+    aws ec2 wait instance-status-ok --instance-ids ${aws_instance.docker-machine-leader-manager.id}
+    eval "$(mssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no  \
+    --region ${data.aws_region.current.name} ${aws_instance.docker-machine-leader-manager.id} docker swarm join-token manager | grep -i 'docker')"
+    yum install amazon-ecr-credential-helper -y
+    mkdir -p /home/ec2-user/.docker
+    cd /home/ec2-user/.docker
+    echo '{"credsStore": "ecr-login"}' > config.json
   EOF
 }
-
 data "template_file" "worker" {
   template = <<EOF
     #! /bin/bash
@@ -107,32 +99,28 @@ data "template_file" "worker" {
     amazon-linux-extras install epel -y
     yum install python-pip -y
     pip install ec2instanceconnectcli
-    eval "$(mssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no  \
-     --region ${data.aws_region.current.name} ${aws_instance.docker-machine-leader-manager.id} docker swarm join-token worker | grep -i 'docker')"
     # uninstall aws cli version 1
     rm -rf /bin/aws
     curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
     unzip awscliv2.zip
     ./aws/install
+    aws ec2 wait instance-status-ok --instance-ids ${aws_instance.docker-machine-leader-manager.id}
+    eval "$(mssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no  \
+     --region ${data.aws_region.current.name} ${aws_instance.docker-machine-leader-manager.id} docker swarm join-token worker | grep -i 'docker')"
+    yum install amazon-ecr-credential-helper -y
+    mkdir -p /home/ec2-user/.docker
+    cd /home/ec2-user/.docker
+    echo '{"credsStore": "ecr-login"}' > config.json
   EOF
 }
 
-resource "aws_ecr_repository" "ecr-repo" {
-  name                 = "aduncan-clarusway-repo/phonebook-app"
-  image_tag_mutability = "MUTABLE"
-  image_scanning_configuration {
-    scan_on_push = false
-  }
-
-}
-
 resource "aws_iam_instance_profile" "ec2ecr-profile" {
-  name = "aduncanswarmprofile"
+  name = "oliverswarmprofile"
   role = aws_iam_role.ec2fulltoecr.name
 }
 
 resource "aws_iam_role" "ec2fulltoecr" {
-  name = "aduncanec2roletoecr"
+  name = "oliverec2roletoecr"
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -175,47 +163,53 @@ resource "aws_iam_role" "ec2fulltoecr" {
 }
 
 resource "aws_instance" "docker-machine-leader-manager" {
-  ami             = "ami-087c17d1fe0178315"
-  instance_type   = "t2.micro"
+  ami             = "ami-0a8b4cd432b1c3063"
+  instance_type   = "t2.medium"
   key_name        = "terrakey"
   root_block_device {
       volume_size = 16
   }  
   //  Write your pem file name
-  security_groups = ["aduncan-docker-swarm-sec-gr"]
+  security_groups = ["oliver-docker-swarm-sec-gr"]
   iam_instance_profile = aws_iam_instance_profile.ec2ecr-profile.name
   user_data = data.template_file.leader-master.rendered
   tags = {
-    Name = "aduncan-Docker-Swarm-Leader-Manager"
+    Name = "oliver-Docker-Swarm-Leader-Manager"
+    server = "docker-grand-master"
+    project = "205"
   }
 }
 
 resource "aws_instance" "docker-machine-managers" {
-  ami             = "ami-087c17d1fe0178315"
+  ami             = "ami-0a8b4cd432b1c3063"
   instance_type   = "t2.micro"
   key_name        = "terrakey"
   //  Write your pem file name
-  security_groups = ["aduncan-docker-swarm-sec-gr"]
+  security_groups = ["oliver-docker-swarm-sec-gr"]
   iam_instance_profile = aws_iam_instance_profile.ec2ecr-profile.name
   count = 2
   user_data = data.template_file.manager.rendered
   tags = {
-    Name = "aduncan-Docker-Swarm-Manager-${count.index + 1}"
+    Name = "oliver-Docker-Swarm-Manager-${count.index + 1}"
+    server = "docker-manager-${count.index + 2}"
+    project = "205"
   }
   depends_on = [aws_instance.docker-machine-leader-manager]
 }
 
 resource "aws_instance" "docker-machine-workers" {
-  ami             = "ami-087c17d1fe0178315"
+  ami             = "ami-0a8b4cd432b1c3063"
   instance_type   = "t2.micro"
   key_name        = "terrakey"
   //  Write your pem file name
-  security_groups = ["aduncan-docker-swarm-sec-gr"]
+  security_groups = ["oliver-docker-swarm-sec-gr"]
   iam_instance_profile = aws_iam_instance_profile.ec2ecr-profile.name
   count = 2
   user_data = data.template_file.worker.rendered
   tags = {
-    Name = "aduncan-Docker-Swarm-Worker-${count.index + 1}"
+    Name = "oliver-Docker-Swarm-Worker-${count.index + 1}"
+    server = "docker-worker-${count.index + 1}"
+    project = "205"
   }
   depends_on = [aws_instance.docker-machine-leader-manager]
 }
@@ -225,7 +219,7 @@ variable "sg-ports" {
   default = [80, 22, 2377, 7946, 8080]
 }
 resource "aws_security_group" "tf-docker-sec-gr" {
-  name = "aduncan-docker-swarm-sec-gr"
+  name = "oliver-docker-swarm-sec-gr"
   tags = {
     Name = "swarm-sec-gr"
   }
@@ -277,8 +271,4 @@ output "manager-public-ip" {
 
 output "worker-public-ip" {
   value = aws_instance.docker-machine-workers.*.public_ip 
-}
-
-output "ecr-repo-url" {
-  value = aws_ecr_repository.ecr-repo.repository_url
 }
